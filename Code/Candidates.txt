@@ -1,0 +1,69 @@
+/*
+ * Welcome to Hawk!
+ *
+ * STEP 1: Scroll down to the 'top_density' alias (line 46), highlight it and click ILLUSTRATE.
+ *         You'll see a data sample flowing through every step of the script.
+ *
+ * STEP 2: Pull some additional data fields into the output.  Add the tempo, artist_hotness, and year fields to
+ *         the 'song_density' alias's field list and press ILLUSTRATE on it again.
+ *
+ * STEP 3: Try running the script against the cluster.  To make it finish faster, switch the 'songs' alias to
+ *         load one file ( s3n://tbmmsd/A.tsv.a ) instead of the full dataset, and click RUN.
+ */
+candidates = LOAD 's3n://FEC/FECCandidate.txt' USING PigStorage('|') AS (
+    candidate_id:chararray,committee_id:chararray,candidate:chararray,city:chararray,state:chararray,
+    zip_code:chararray,party:chararray,status:chararray,election_year:chararray);
+
+committees = LOAD 's3n://FEC/FECCommittee.dat' USING PigStorage('|') AS (
+    committee_id:chararray,candidate_id:chararray,committee_designation:chararray,committee_type:chararray,
+    committee_name:chararray,committee_party:chararray,address1:chararray,address2:chararray,city:chararray,
+    state:chararray,zip_code:chararray,treasurer:chararray);
+    
+indiv_cont = LOAD 's3n://FEC/itcont.dta' USING PigStorage('|') AS (
+    committee_id:chararray,amendment_ind:chararray,report_type:chararray,trans_pgi:chararray,
+    image_num:chararray,transaction_type:chararray,entity_type:chararray,contributor_name:chararray,contrib_city:chararray,
+    contrib_state:chararray,contrib_zip_code:chararray,employer:chararray,occupation:chararray, trans_date:chararray,
+    transaction_amt:float,other_id:chararray,tran_id:chararray,file_num:chararray,
+    memo_cd:chararray,memo_text:chararray,sub_id:chararray);
+
+-- Use FILTER to get only songs that have a duration
+filtered_candidates = FILTER candidates BY (state == 'MN' or state == 'NY' or state == 'VA');
+filtered_MN_candidates = FILTER candidates BY (state == 'MN');
+
+-- Use FILTER to get only MN contributions
+filtered_mn_contribs = FILTER indiv_cont BY (contrib_state == 'MN');
+filtered_mn_non_contribs = FILTER indiv_cont BY (contrib_state !='MN');
+filtered_va_contribs = FILTER indiv_cont BY (contrib_state == 'VA');
+filtered_va_non_contribs = FILTER indiv_cont BY (contrib_state !='VA');
+filtered_ny_contribs = FILTER indiv_cont BY (contrib_state == 'NY');
+filtered_ny_non_contribs = FILTER indiv_cont BY (contrib_state !='NY');
+
+jnd   = join filtered_candidates by (committee_id) left outer, committees by (committee_id);
+jnd_MN   = join filtered_MN_candidates by (committee_id) left outer, committees by (committee_id);
+
+bystate = order jnd by filtered_candidates::state;
+
+jnd_contributions = join bystate by (filtered_candidates::committee_id) left outer, indiv_cont by (committee_id);
+jnd_mn_contribs = join jnd_MN by (filtered_MN_candidates::committee_id) left outer, filtered_mn_contribs by (committee_id);
+jnd_non_mn_contribs = join jnd_MN by (filtered_MN_candidates::committee_id) left outer, filtered_mn_non_contribs by (committee_id);
+
+upped = foreach jnd_contributions generate UPPER(filtered_candidates::candidate) as candidateName, indiv_cont::transaction_amt as contribution;
+grpd  = group upped by candidateName;   --output a bag upped for each value of symbol
+--take a bag of integers, produce one result for each group
+sums  = foreach grpd generate group, SUM(upped.contribution);
+
+upperMN = foreach jnd_mn_contribs generate UPPER(filtered_MN_candidates::candidate) as candidateName, filtered_mn_contribs::transaction_amt as contribution;
+grpdMN  = group upperMN by candidateName;   --output a bag upped for each value of symbol
+--take a bag of integers, produce one result for each group
+sumsMN  = foreach grpdMN generate group, SUM(upperMN.contribution);
+
+upperNonMN = foreach jnd_non_mn_contribs generate UPPER(filtered_MN_candidates::candidate) as candidateName, filtered_mn_non_contribs::transaction_amt as contribution;
+grpdNonMN  = group upperNonMN by candidateName;   --output a bag upped for each value of symbol
+--take a bag of integers, produce one result for each group
+sumsNonMN  = foreach grpdNonMN generate group, SUM(upperNonMN.contribution);
+
+joinedTotalMN = join sumsMN by (group) left outer, sumsNonMN by (group);
+rmf s3n://Mortar/MortarData;
+
+STORE sums INTO 's3n://Mortar/MortarData/indivContribs' USING PigStorage('|');
+STORE joinedTotalMN INTO 's3n://Mortar/MortarData/mnContribs' USING PigStorage('|');

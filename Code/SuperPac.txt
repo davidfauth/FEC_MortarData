@@ -1,0 +1,60 @@
+
+/*
+ * Welcome to PAC!
+ *
+ * STEP 1: Scroll down to the 'top_density' alias (line 46), highlight it and click ILLUSTRATE.
+ *         You'll see a data sample flowing through every step of the script.
+ *
+ * STEP 2: Pull some additional data fields into the output.  Add the tempo, artist_hotness, and year fields to
+ *         the 'song_density' alias's field list and press ILLUSTRATE on it again.
+ *
+ * STEP 3: Try running the script against the cluster.  To make it finish faster, switch the 'songs' alias to
+ *         load one file ( s3n://tbmmsd/A.tsv.a ) instead of the full dataset, and click RUN.
+ */
+ 
+pac_expend = LOAD 's3n://SuperPac/pacExpendTab.dta' USING PigStorage('\t') AS (
+ spending_committee:chararray,spending_committee_id:chararray,is_superpac:chararray,
+ election_type:chararray,candidate_supp_opp:chararray,support_oppose_flag:chararray,
+ candidate_id:chararray,candidate_party:chararray,candidate_office:chararray,
+ candidate_district:chararray,candidate_state:chararray,expenditure_amt:float,expenditure_state:chararray,
+ expenditure_date:chararray,election_type_two:chararray,recipient:chararray,purpose:chararray,
+ transaction_id:chararray,filing_number:chararray);
+
+pac_donors = LOAD 's3n://SuperPac/pacDonorsTab.dat' USING PigStorage('\t') AS (
+ donor_type:chararray,receiving_super_pac:chararray,super_pac_id:chararray,donating_organization:chararray,
+ donor_last:chararray,donor_first:chararray,donor_city:chararray,donor_state:chararray,
+ donor_occupation:chararray,employer:chararray,amount:float,date:chararray,total_amt_given_pac:float,
+ transaction_id:chararray,filing_number:chararray);
+
+filter_pac_expend = foreach pac_expend generate transaction_id, REPLACE(spending_committee,'\\"','') as newCommittee, 
+support_oppose_flag, spending_committee_id,
+ UPPER(REPLACE(candidate_supp_opp, '\\"', '')) as candidateName, expenditure_amt, expenditure_date, 
+ REPLACE(purpose,'\\"','') as newPurpose;
+ 
+filter_pac_donors = foreach pac_donors generate donor_type, REPLACE(receiving_super_pac,'\\"','') as newReceivingSuperPac,
+    super_pac_id,REPLACE(donating_organization,'\\"','') as newDonatingOrganization, donor_last,
+    donor_first, amount, date, REPLACE(employer,'\\"','') as newEmployer, 
+    REPLACE(donor_occupation,'\\"','') as newDonorOccupation;
+
+filtered_presidential = FILTER filter_pac_expend BY (candidateName == 'OBAMA, BARACK' or candidateName == 'ROMNEY, MITT');
+
+grouped_expend  = group filtered_presidential by spending_committee_id;
+groupList  = foreach grouped_expend generate group;
+
+--joinedDonors = join by_group by (spending_committee_id) left outer, filter_pac_donors by (super_pac_id);
+jnd_contributions = join groupList by (group) left outer, filter_pac_donors by (super_pac_id);
+--joinedDonors = COGROUP filter_pac_donors BY super_pac_id, filtered_presidential BY spending_committee_id;
+
+
+
+/*
+filtered_geo = FILTER filtered_presidential BY (transaction_id == 'SE.39005');
+pac_geo = foreach filtered_geo generate transaction_id, get_lat() as newLat;
+*/
+
+pac_expend_json = foreach filtered_presidential generate transaction_id,newCommittee, support_oppose_flag, 
+candidateName, expenditure_amt, expenditure_date, newPurpose;
+
+rmf s3n://Mortar/SuperPac;
+--STORE pac_geo INTO 's3n://Mortar/SuperPac/pac_expend_geo' USING PigStorage('|');
+STORE pac_expend_json INTO 's3n://Mortar/SuperPac/pac_expend_json' USING PigStorage('|');
